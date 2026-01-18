@@ -53,9 +53,15 @@ RUN pnpm build
 ENV CLAWDBOT_PREFER_PNPM=1
 RUN pnpm ui:install
 RUN pnpm ui:build
+RUN printf '#!/bin/sh\nexec node /app/dist/index.js "$@"\n' > /usr/local/bin/clawdbot \
+    && chmod +x /usr/local/bin/clawdbot
 
 # Install Playwright Chromium with system dependencies
 RUN npx -y playwright@latest install --with-deps chromium
+
+ARG CLAWDBOT_GATEWAY_TOKEN
+RUN echo "CLAWDBOT_GATEWAY_TOKEN=${CLAWDBOT_GATEWAY_TOKEN}" >> /etc/environment && \
+    echo "export CLAWDBOT_GATEWAY_TOKEN=${CLAWDBOT_GATEWAY_TOKEN}" >> /root/.bashrc
 
 ENV NODE_ENV=production
 
