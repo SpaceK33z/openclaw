@@ -18,11 +18,17 @@ RUN mkdir -p -m 755 /etc/apt/keyrings && \
 
 # Install additional tools
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ffmpeg git jq && \
+    apt-get install -y --no-install-recommends curl ffmpeg git jq openssh-server && \
     curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
     chmod a+rx /usr/local/bin/yt-dlp && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Configure SSH
+RUN mkdir -p /run/sshd && \
+    ssh-keygen -A && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config && \
+    sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 
 WORKDIR /app
 
@@ -51,10 +57,19 @@ RUN pnpm ui:build
 # Install Playwright Chromium with system dependencies
 RUN npx -y playwright install --with-deps chromium
 
+# SSH public key (optional - only set up authorized_keys if provided)
+ARG SSH_PUBLIC_KEY=""
+RUN if [ -n "$SSH_PUBLIC_KEY" ]; then \
+      mkdir -p /root/.ssh && \
+      chmod 700 /root/.ssh && \
+      echo "$SSH_PUBLIC_KEY" > /root/.ssh/authorized_keys && \
+      chmod 600 /root/.ssh/authorized_keys; \
+    fi
+
 ENV NODE_ENV=production
 
 VOLUME /root/.clawdbot
-EXPOSE 18789
+EXPOSE 18789 22
 
 # Gateway as default; override with docker exec for CLI
-CMD ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
+CMD /usr/sbin/sshd && node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured
