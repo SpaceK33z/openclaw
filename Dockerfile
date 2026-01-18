@@ -55,7 +55,7 @@ RUN pnpm ui:install
 RUN pnpm ui:build
 
 # Install Playwright Chromium with system dependencies
-RUN npx -y playwright install --with-deps chromium
+RUN npx -y playwright@latest install --with-deps chromium
 
 # SSH public key (optional - only set up authorized_keys if provided)
 ARG SSH_PUBLIC_KEY=""
