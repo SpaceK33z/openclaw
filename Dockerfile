@@ -57,19 +57,18 @@ RUN pnpm ui:build
 # Install Playwright Chromium with system dependencies
 RUN npx -y playwright@latest install --with-deps chromium
 
-# SSH public key (optional - only set up authorized_keys if provided)
-ARG SSH_PUBLIC_KEY=""
-RUN if [ -n "$SSH_PUBLIC_KEY" ]; then \
-      mkdir -p /root/.ssh && \
-      chmod 700 /root/.ssh && \
-      echo "$SSH_PUBLIC_KEY" > /root/.ssh/authorized_keys && \
-      chmod 600 /root/.ssh/authorized_keys; \
-    fi
-
 ENV NODE_ENV=production
 
 VOLUME /root/.clawdbot
 EXPOSE 18789 22
 
 # Gateway as default; override with docker exec for CLI
-CMD /usr/sbin/sshd && node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured
+# SSH_PUBLIC_KEY env var: if set, configures authorized_keys at startup
+CMD if [ -n "$SSH_PUBLIC_KEY" ]; then \
+      mkdir -p /root/.ssh && \
+      chmod 700 /root/.ssh && \
+      echo "$SSH_PUBLIC_KEY" > /root/.ssh/authorized_keys && \
+      chmod 600 /root/.ssh/authorized_keys && \
+      /usr/sbin/sshd; \
+    fi && \
+    node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured
