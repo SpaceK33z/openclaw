@@ -2,4 +2,4 @@
 set -e
 
 git fetch upstream
-git merge upstream/main
+git merge upstream/main --no-edit
