@@ -4,8 +4,6 @@ import type { SessionManager } from "@mariozechner/pi-coding-agent";
 
 import { registerUnhandledRejectionHandler } from "../../infra/unhandled-rejections.js";
 import {
-  downgradeGeminiThinkingBlocks,
-  downgradeGeminiHistory,
   isCompactionFailureError,
   isGoogleModelApi,
   sanitizeGoogleTurnOrdering,
@@ -197,7 +195,6 @@ export async function sanitizeSessionHistory(params: {
   const modelId = (params.modelId ?? "").toLowerCase();
   const isOpenRouterGemini =
     (provider === "openrouter" || provider === "opencode") && modelId.includes("gemini");
-  const isGeminiLike = isGoogleModelApi(params.modelApi) || isOpenRouterGemini;
   const sanitizedImages = await sanitizeSessionMessagesImages(params.messages, "session:history", {
     sanitizeToolCallIds: shouldSanitizeToolCallIds(params.modelApi),
     enforceToolCallLast: params.modelApi === "anthropic-messages",
@@ -207,20 +204,9 @@ export async function sanitizeSessionHistory(params: {
       : undefined,
   });
   const repairedTools = sanitizeToolUseResultPairing(sanitizedImages);
-  const isAntigravityProvider =
-    provider === "google-antigravity" || params.modelApi === "google-antigravity";
-  const shouldDowngradeThinking = isGeminiLike && !isAntigravityClaudeModel;
-  // Gemini rejects unsigned thinking blocks; downgrade them before send to avoid INVALID_ARGUMENT.
-  const downgradedThinking = shouldDowngradeThinking
-    ? downgradeGeminiThinkingBlocks(repairedTools)
-    : repairedTools;
-  const shouldDowngradeHistory = shouldDowngradeThinking && !isAntigravityProvider;
-  const downgraded = shouldDowngradeHistory
-    ? downgradeGeminiHistory(downgradedThinking)
-    : downgradedThinking;
 
   return applyGoogleTurnOrderingFix({
-    messages: downgraded,
+    messages: repairedTools,
     modelApi: params.modelApi,
     sessionManager: params.sessionManager,
     sessionId: params.sessionId,

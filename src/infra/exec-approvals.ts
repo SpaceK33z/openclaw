@@ -188,38 +188,88 @@ export function ensureExecApprovals(): ExecApprovalsFile {
   return updated;
 }
 
-function normalizeSecurity(value?: ExecSecurity): ExecSecurity {
+function normalizeSecurity(value: ExecSecurity | undefined, fallback: ExecSecurity): ExecSecurity {
   if (value === "allowlist" || value === "full" || value === "deny") return value;
-  return DEFAULT_SECURITY;
+  return fallback;
 }
 
-function normalizeAsk(value?: ExecAsk): ExecAsk {
+function normalizeAsk(value: ExecAsk | undefined, fallback: ExecAsk): ExecAsk {
   if (value === "always" || value === "off" || value === "on-miss") return value;
-  return DEFAULT_ASK;
+  return fallback;
 }
 
-export function resolveExecApprovals(agentId?: string): ExecApprovalsResolved {
+export type ExecApprovalsDefaultOverrides = {
+  security?: ExecSecurity;
+  ask?: ExecAsk;
+  askFallback?: ExecSecurity;
+  autoAllowSkills?: boolean;
+};
+
+export function resolveExecApprovals(
+  agentId?: string,
+  overrides?: ExecApprovalsDefaultOverrides,
+): ExecApprovalsResolved {
   const file = ensureExecApprovals();
-  const defaults = file.defaults ?? {};
-  const agentKey = agentId ?? "default";
-  const agent = file.agents?.[agentKey] ?? {};
-  const resolvedDefaults: Required<ExecApprovalsDefaults> = {
-    security: normalizeSecurity(defaults.security),
-    ask: normalizeAsk(defaults.ask),
-    askFallback: normalizeSecurity(defaults.askFallback ?? DEFAULT_ASK_FALLBACK),
-    autoAllowSkills: Boolean(defaults.autoAllowSkills ?? DEFAULT_AUTO_ALLOW_SKILLS),
-  };
-  const resolvedAgent: Required<ExecApprovalsDefaults> = {
-    security: normalizeSecurity(agent.security ?? resolvedDefaults.security),
-    ask: normalizeAsk(agent.ask ?? resolvedDefaults.ask),
-    askFallback: normalizeSecurity(agent.askFallback ?? resolvedDefaults.askFallback),
-    autoAllowSkills: Boolean(agent.autoAllowSkills ?? resolvedDefaults.autoAllowSkills),
-  };
-  const allowlist = Array.isArray(agent.allowlist) ? agent.allowlist : [];
-  return {
+  return resolveExecApprovalsFromFile({
+    file,
+    agentId,
+    overrides,
     path: resolveExecApprovalsPath(),
     socketPath: expandHome(file.socket?.path ?? resolveExecApprovalsSocketPath()),
     token: file.socket?.token ?? "",
+  });
+}
+
+export function resolveExecApprovalsFromFile(params: {
+  file: ExecApprovalsFile;
+  agentId?: string;
+  overrides?: ExecApprovalsDefaultOverrides;
+  path?: string;
+  socketPath?: string;
+  token?: string;
+}): ExecApprovalsResolved {
+  const file = normalizeExecApprovals(params.file);
+  const defaults = file.defaults ?? {};
+  const agentKey = params.agentId ?? "default";
+  const agent = file.agents?.[agentKey] ?? {};
+  const wildcard = file.agents?.["*"] ?? {};
+  const fallbackSecurity = params.overrides?.security ?? DEFAULT_SECURITY;
+  const fallbackAsk = params.overrides?.ask ?? DEFAULT_ASK;
+  const fallbackAskFallback = params.overrides?.askFallback ?? DEFAULT_ASK_FALLBACK;
+  const fallbackAutoAllowSkills = params.overrides?.autoAllowSkills ?? DEFAULT_AUTO_ALLOW_SKILLS;
+  const resolvedDefaults: Required<ExecApprovalsDefaults> = {
+    security: normalizeSecurity(defaults.security, fallbackSecurity),
+    ask: normalizeAsk(defaults.ask, fallbackAsk),
+    askFallback: normalizeSecurity(
+      defaults.askFallback ?? fallbackAskFallback,
+      fallbackAskFallback,
+    ),
+    autoAllowSkills: Boolean(defaults.autoAllowSkills ?? fallbackAutoAllowSkills),
+  };
+  const resolvedAgent: Required<ExecApprovalsDefaults> = {
+    security: normalizeSecurity(
+      agent.security ?? wildcard.security ?? resolvedDefaults.security,
+      resolvedDefaults.security,
+    ),
+    ask: normalizeAsk(agent.ask ?? wildcard.ask ?? resolvedDefaults.ask, resolvedDefaults.ask),
+    askFallback: normalizeSecurity(
+      agent.askFallback ?? wildcard.askFallback ?? resolvedDefaults.askFallback,
+      resolvedDefaults.askFallback,
+    ),
+    autoAllowSkills: Boolean(
+      agent.autoAllowSkills ?? wildcard.autoAllowSkills ?? resolvedDefaults.autoAllowSkills,
+    ),
+  };
+  const allowlist = [
+    ...(Array.isArray(wildcard.allowlist) ? wildcard.allowlist : []),
+    ...(Array.isArray(agent.allowlist) ? agent.allowlist : []),
+  ];
+  return {
+    path: params.path ?? resolveExecApprovalsPath(),
+    socketPath: expandHome(
+      params.socketPath ?? file.socket?.path ?? resolveExecApprovalsSocketPath(),
+    ),
+    token: params.token ?? file.socket?.token ?? "",
     defaults: resolvedDefaults,
     agent: resolvedAgent,
     allowlist,

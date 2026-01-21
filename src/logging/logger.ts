@@ -4,9 +4,10 @@ import path from "node:path";
 
 import { Logger as TsLogger } from "tslog";
 
-import type { ClawdbotConfig } from "../config/config.js";
+import type { ClawdbotConfig } from "../config/types.js";
 import type { ConsoleStyle } from "./console.js";
 import { type LogLevel, levelToMinLevel, normalizeLogLevel } from "./levels.js";
+import { readLoggingConfig } from "./config.js";
 import { loggingState } from "./state.js";
 
 // Pin to /tmp so mac Debug UI and docs match; os.tmpdir() can be a per-user
@@ -34,12 +35,26 @@ type ResolvedSettings = {
   file: string;
 };
 export type LoggerResolvedSettings = ResolvedSettings;
+export type LogTransportRecord = Record<string, unknown>;
+export type LogTransport = (logObj: LogTransportRecord) => void;
+
+const externalTransports = new Set<LogTransport>();
+
+function attachExternalTransport(logger: TsLogger<LogObj>, transport: LogTransport): void {
+  logger.attachTransport((logObj: LogObj) => {
+    if (!externalTransports.has(transport)) return;
+    try {
+      transport(logObj as LogTransportRecord);
+    } catch {
+      // never block on logging failures
+    }
+  });
+}
 
 function resolveSettings(): ResolvedSettings {
-  let cfg: ClawdbotConfig["logging"] | undefined;
-  if (loggingState.overrideSettings) {
-    cfg = loggingState.overrideSettings as LoggerSettings;
-  } else {
+  let cfg: ClawdbotConfig["logging"] | undefined =
+    (loggingState.overrideSettings as LoggerSettings | null) ?? readLoggingConfig();
+  if (!cfg) {
     try {
       const loaded = requireConfig("../config/config.js") as {
         loadConfig?: () => ClawdbotConfig;
@@ -87,6 +102,9 @@ function buildLogger(settings: ResolvedSettings): TsLogger<LogObj> {
       // never block on logging failures
     }
   });
+  for (const transport of externalTransports) {
+    attachExternalTransport(logger, transport);
+  }
 
   return logger;
 }
@@ -166,6 +184,17 @@ export function resetLogger() {
   loggingState.cachedSettings = null;
   loggingState.cachedConsoleSettings = null;
   loggingState.overrideSettings = null;
+}
+
+export function registerLogTransport(transport: LogTransport): () => void {
+  externalTransports.add(transport);
+  const logger = loggingState.cachedLogger as TsLogger<LogObj> | null;
+  if (logger) {
+    attachExternalTransport(logger, transport);
+  }
+  return () => {
+    externalTransports.delete(transport);
+  };
 }
 
 function defaultRollingPathForToday(): string {

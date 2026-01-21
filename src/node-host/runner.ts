@@ -1,16 +1,13 @@
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
-import type { BridgeInvokeRequestFrame } from "../infra/bridge/server/types.js";
 import {
   addAllowlistEntry,
   matchAllowlist,
   normalizeExecApprovals,
   recordAllowlistUse,
-  requestExecApprovalViaSocket,
   resolveCommandResolution,
   resolveExecApprovals,
   ensureExecApprovals,
@@ -26,10 +23,14 @@ import {
   type ExecHostRunResult,
 } from "../infra/exec-host.js";
 import { getMachineDisplayName } from "../infra/machine-name.js";
+import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
+import { loadConfig } from "../config/config.js";
+import { ensureClawdbotCliOnPath } from "../infra/path-env.js";
 import { VERSION } from "../version.js";
+import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 
-import { BridgeClient } from "./bridge-client.js";
 import { ensureNodeHostConfig, saveNodeHostConfig, type NodeHostGatewayConfig } from "./config.js";
+import { GatewayClient } from "../gateway/client.js";
 
 type NodeHostRunOptions = {
   gatewayHost: string;
@@ -49,6 +50,8 @@ type SystemRunParams = {
   needsScreenRecording?: boolean | null;
   agentId?: string | null;
   sessionKey?: string | null;
+  approved?: boolean | null;
+  approvalDecision?: string | null;
 };
 
 type SystemWhichParams = {
@@ -89,11 +92,22 @@ type ExecEventPayload = {
   reason?: string;
 };
 
+type NodeInvokeRequestPayload = {
+  id: string;
+  nodeId: string;
+  command: string;
+  paramsJSON?: string | null;
+  timeoutMs?: number | null;
+  idempotencyKey?: string | null;
+};
+
 const OUTPUT_CAP = 200_000;
 const OUTPUT_EVENT_TAIL = 20_000;
+const DEFAULT_NODE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 const execHostEnforced = process.env.CLAWDBOT_NODE_EXEC_HOST?.trim().toLowerCase() === "app";
-const execHostFallbackAllowed = process.env.CLAWDBOT_NODE_EXEC_FALLBACK?.trim() === "1";
+const execHostFallbackAllowed =
+  process.env.CLAWDBOT_NODE_EXEC_FALLBACK?.trim().toLowerCase() !== "0";
 
 const blockedEnvKeys = new Set([
   "PATH",
@@ -275,8 +289,16 @@ function resolveEnvPath(env?: Record<string, string>): string[] {
     (env as Record<string, string>)?.Path ??
     process.env.PATH ??
     process.env.Path ??
-    "";
+    DEFAULT_NODE_PATH;
   return raw.split(path.delimiter).filter(Boolean);
+}
+
+function ensureNodePathEnv(): string {
+  ensureClawdbotCliOnPath({ pathEnv: process.env.PATH ?? "" });
+  const current = process.env.PATH ?? "";
+  if (current.trim()) return current;
+  process.env.PATH = DEFAULT_NODE_PATH;
+  return DEFAULT_NODE_PATH;
 }
 
 function resolveExecutable(bin: string, env?: Record<string, string>) {
@@ -331,7 +353,6 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
   const nodeId = opts.nodeId?.trim() || config.nodeId;
   if (nodeId !== config.nodeId) {
     config.nodeId = nodeId;
-    config.token = undefined;
   }
   const displayName =
     opts.displayName?.trim() || config.displayName || (await getMachineDisplayName());
@@ -339,37 +360,41 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
   const gateway: NodeHostGatewayConfig = {
     host: opts.gatewayHost,
     port: opts.gatewayPort,
-    tls: opts.gatewayTls === true,
+    tls: opts.gatewayTls ?? loadConfig().gateway?.tls?.enabled ?? false,
     tlsFingerprint: opts.gatewayTlsFingerprint,
   };
   config.gateway = gateway;
   await saveNodeHostConfig(config);
 
-  let disconnectResolve: (() => void) | null = null;
-  let disconnectSignal = false;
-  const waitForDisconnect = () =>
-    new Promise<void>((resolve) => {
-      if (disconnectSignal) {
-        disconnectSignal = false;
-        resolve();
-        return;
-      }
-      disconnectResolve = resolve;
-    });
+  const cfg = loadConfig();
+  const isRemoteMode = cfg.gateway?.mode === "remote";
+  const token =
+    process.env.CLAWDBOT_GATEWAY_TOKEN?.trim() ||
+    (isRemoteMode ? cfg.gateway?.remote?.token : cfg.gateway?.auth?.token);
+  const password =
+    process.env.CLAWDBOT_GATEWAY_PASSWORD?.trim() ||
+    (isRemoteMode ? cfg.gateway?.remote?.password : cfg.gateway?.auth?.password);
 
-  const client = new BridgeClient({
-    host: gateway.host ?? "127.0.0.1",
-    port: gateway.port ?? 18790,
-    tls: gateway.tls,
-    tlsFingerprint: gateway.tlsFingerprint,
-    nodeId,
-    token: config.token,
-    displayName,
+  const host = gateway.host ?? "127.0.0.1";
+  const port = gateway.port ?? 18789;
+  const scheme = gateway.tls ? "wss" : "ws";
+  const url = `${scheme}://${host}:${port}`;
+  const pathEnv = ensureNodePathEnv();
+  // eslint-disable-next-line no-console
+  console.log(`node host PATH: ${pathEnv}`);
+
+  const client = new GatewayClient({
+    url,
+    token: token?.trim() || undefined,
+    password: password?.trim() || undefined,
+    instanceId: nodeId,
+    clientName: GATEWAY_CLIENT_NAMES.NODE_HOST,
+    clientDisplayName: displayName,
+    clientVersion: VERSION,
     platform: process.platform,
-    version: VERSION,
-    coreVersion: VERSION,
-    deviceFamily: os.platform(),
-    modelIdentifier: os.hostname(),
+    mode: GATEWAY_CLIENT_MODES.NODE,
+    role: "node",
+    scopes: [],
     caps: ["system"],
     commands: [
       "system.run",
@@ -377,25 +402,24 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
       "system.execApprovals.get",
       "system.execApprovals.set",
     ],
-    onPairToken: async (token) => {
-      config.token = token;
-      await saveNodeHostConfig(config);
+    pathEnv,
+    permissions: undefined,
+    deviceIdentity: loadOrCreateDeviceIdentity(),
+    tlsFingerprint: gateway.tlsFingerprint,
+    onEvent: (evt) => {
+      if (evt.event !== "node.invoke.request") return;
+      const payload = coerceNodeInvokePayload(evt.payload);
+      if (!payload) return;
+      void handleInvoke(payload, client, skillBins);
     },
-    onAuthReset: async () => {
-      if (!config.token) return;
-      config.token = undefined;
-      await saveNodeHostConfig(config);
+    onConnectError: (err) => {
+      // keep retrying (handled by GatewayClient)
+      // eslint-disable-next-line no-console
+      console.error(`node host gateway connect failed: ${err.message}`);
     },
-    onInvoke: async (frame) => {
-      await handleInvoke(frame, client, skillBins);
-    },
-    onDisconnected: () => {
-      if (disconnectResolve) {
-        disconnectResolve();
-        disconnectResolve = null;
-      } else {
-        disconnectSignal = true;
-      }
+    onClose: (code, reason) => {
+      // eslint-disable-next-line no-console
+      console.error(`node host gateway closed (${code}): ${reason}`);
     },
   });
 
@@ -408,20 +432,13 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
     return bins;
   });
 
-  while (true) {
-    try {
-      await client.connect();
-      await waitForDisconnect();
-    } catch {
-      // ignore connect errors; retry
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-  }
+  client.start();
+  await new Promise(() => {});
 }
 
 async function handleInvoke(
-  frame: BridgeInvokeRequestFrame,
-  client: BridgeClient,
+  frame: NodeInvokeRequestPayload,
+  client: GatewayClient,
   skillBins: SkillBinsCache,
 ) {
   const command = String(frame.command ?? "");
@@ -435,16 +452,12 @@ async function handleInvoke(
         hash: snapshot.hash,
         file: redactExecApprovals(snapshot.file),
       };
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
+      await sendInvokeResult(client, frame, {
         ok: true,
         payloadJSON: JSON.stringify(payload),
       });
     } catch (err) {
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
+      await sendInvokeResult(client, frame, {
         ok: false,
         error: { code: "INVALID_REQUEST", message: String(err) },
       });
@@ -482,16 +495,12 @@ async function handleInvoke(
         hash: nextSnapshot.hash,
         file: redactExecApprovals(nextSnapshot.file),
       };
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
+      await sendInvokeResult(client, frame, {
         ok: true,
         payloadJSON: JSON.stringify(payload),
       });
     } catch (err) {
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
+      await sendInvokeResult(client, frame, {
         ok: false,
         error: { code: "INVALID_REQUEST", message: String(err) },
       });
@@ -507,16 +516,12 @@ async function handleInvoke(
       }
       const env = sanitizeEnv(undefined);
       const payload = await handleSystemWhich(params, env);
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
+      await sendInvokeResult(client, frame, {
         ok: true,
         payloadJSON: JSON.stringify(payload),
       });
     } catch (err) {
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
+      await sendInvokeResult(client, frame, {
         ok: false,
         error: { code: "INVALID_REQUEST", message: String(err) },
       });
@@ -525,9 +530,7 @@ async function handleInvoke(
   }
 
   if (command !== "system.run") {
-    client.sendInvokeResponse({
-      type: "invoke-res",
-      id: frame.id,
+    await sendInvokeResult(client, frame, {
       ok: false,
       error: { code: "UNAVAILABLE", message: "command not supported" },
     });
@@ -538,9 +541,7 @@ async function handleInvoke(
   try {
     params = decodeParams<SystemRunParams>(frame.paramsJSON);
   } catch (err) {
-    client.sendInvokeResponse({
-      type: "invoke-res",
-      id: frame.id,
+    await sendInvokeResult(client, frame, {
       ok: false,
       error: { code: "INVALID_REQUEST", message: String(err) },
     });
@@ -548,9 +549,7 @@ async function handleInvoke(
   }
 
   if (!Array.isArray(params.command) || params.command.length === 0) {
-    client.sendInvokeResponse({
-      type: "invoke-res",
-      id: frame.id,
+    await sendInvokeResult(client, frame, {
       ok: false,
       error: { code: "INVALID_REQUEST", message: "command required" },
     });
@@ -561,10 +560,9 @@ async function handleInvoke(
   const rawCommand = typeof params.rawCommand === "string" ? params.rawCommand.trim() : "";
   const cmdText = rawCommand || formatCommand(argv);
   const agentId = params.agentId?.trim() || undefined;
-  const approvals = resolveExecApprovals(agentId);
+  const approvals = resolveExecApprovals(agentId, { security: "allowlist" });
   const security = approvals.agent.security;
   const ask = approvals.agent.ask;
-  const askFallback = approvals.agent.askFallback;
   const autoAllowSkills = approvals.agent.autoAllowSkills;
   const sessionKey = params.sessionKey?.trim() || "node";
   const runId = crypto.randomUUID();
@@ -576,9 +574,12 @@ async function handleInvoke(
   const skillAllow =
     autoAllowSkills && resolution?.executableName ? bins.has(resolution.executableName) : false;
 
-  const useMacAppExec =
-    process.platform === "darwin" && (execHostEnforced || !execHostFallbackAllowed);
+  const useMacAppExec = process.platform === "darwin";
   if (useMacAppExec) {
+    const approvalDecision =
+      params.approvalDecision === "allow-once" || params.approvalDecision === "allow-always"
+        ? params.approvalDecision
+        : null;
     const execRequest: ExecHostRequest = {
       command: argv,
       rawCommand: rawCommand || null,
@@ -588,34 +589,35 @@ async function handleInvoke(
       needsScreenRecording: params.needsScreenRecording ?? null,
       agentId: agentId ?? null,
       sessionKey: sessionKey ?? null,
+      approvalDecision,
     };
     const response = await runViaMacAppExecHost({ approvals, request: execRequest });
     if (!response) {
-      client.sendEvent(
-        "exec.denied",
-        buildExecEventPayload({
-          sessionKey,
-          runId,
-          host: "node",
-          command: cmdText,
-          reason: "companion-unavailable",
-        }),
-      );
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
-        ok: false,
-        error: {
-          code: "UNAVAILABLE",
-          message: "COMPANION_APP_UNAVAILABLE: macOS app exec host unreachable",
-        },
-      });
-      return;
-    }
-
-    if (!response.ok) {
+      if (execHostEnforced || !execHostFallbackAllowed) {
+        await sendNodeEvent(
+          client,
+          "exec.denied",
+          buildExecEventPayload({
+            sessionKey,
+            runId,
+            host: "node",
+            command: cmdText,
+            reason: "companion-unavailable",
+          }),
+        );
+        await sendInvokeResult(client, frame, {
+          ok: false,
+          error: {
+            code: "UNAVAILABLE",
+            message: "COMPANION_APP_UNAVAILABLE: macOS app exec host unreachable",
+          },
+        });
+        return;
+      }
+    } else if (!response.ok) {
       const reason = response.error.reason ?? "approval-required";
-      client.sendEvent(
+      await sendNodeEvent(
+        client,
         "exec.denied",
         buildExecEventPayload({
           sessionKey,
@@ -625,41 +627,39 @@ async function handleInvoke(
           reason,
         }),
       );
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
+      await sendInvokeResult(client, frame, {
         ok: false,
         error: { code: "UNAVAILABLE", message: response.error.message },
       });
       return;
+    } else {
+      const result: ExecHostRunResult = response.payload;
+      const combined = [result.stdout, result.stderr, result.error].filter(Boolean).join("\n");
+      await sendNodeEvent(
+        client,
+        "exec.finished",
+        buildExecEventPayload({
+          sessionKey,
+          runId,
+          host: "node",
+          command: cmdText,
+          exitCode: result.exitCode,
+          timedOut: result.timedOut,
+          success: result.success,
+          output: combined,
+        }),
+      );
+      await sendInvokeResult(client, frame, {
+        ok: true,
+        payloadJSON: JSON.stringify(result),
+      });
+      return;
     }
-
-    const result: ExecHostRunResult = response.payload;
-    const combined = [result.stdout, result.stderr, result.error].filter(Boolean).join("\n");
-    client.sendEvent(
-      "exec.finished",
-      buildExecEventPayload({
-        sessionKey,
-        runId,
-        host: "node",
-        command: cmdText,
-        exitCode: result.exitCode,
-        timedOut: result.timedOut,
-        success: result.success,
-        output: combined,
-      }),
-    );
-    client.sendInvokeResponse({
-      type: "invoke-res",
-      id: frame.id,
-      ok: true,
-      payloadJSON: JSON.stringify(result),
-    });
-    return;
   }
 
   if (security === "deny") {
-    client.sendEvent(
+    await sendNodeEvent(
+      client,
       "exec.denied",
       buildExecEventPayload({
         sessionKey,
@@ -669,9 +669,7 @@ async function handleInvoke(
         reason: "security=deny",
       }),
     );
-    client.sendInvokeResponse({
-      type: "invoke-res",
-      id: frame.id,
+    await sendInvokeResult(client, frame, {
       ok: false,
       error: { code: "UNAVAILABLE", message: "SYSTEM_RUN_DISABLED: security=deny" },
     });
@@ -682,99 +680,37 @@ async function handleInvoke(
     ask === "always" ||
     (ask === "on-miss" && security === "allowlist" && !allowlistMatch && !skillAllow);
 
-  let approvedByAsk = false;
-  if (requiresAsk) {
-    const decision = await requestExecApprovalViaSocket({
-      socketPath: approvals.socketPath,
-      token: approvals.token,
-      request: {
-        command: cmdText,
-        cwd: params.cwd ?? undefined,
+  const approvalDecision =
+    params.approvalDecision === "allow-once" || params.approvalDecision === "allow-always"
+      ? params.approvalDecision
+      : null;
+  const approvedByAsk = approvalDecision !== null || params.approved === true;
+  if (requiresAsk && !approvedByAsk) {
+    await sendNodeEvent(
+      client,
+      "exec.denied",
+      buildExecEventPayload({
+        sessionKey,
+        runId,
         host: "node",
-        security,
-        ask,
-        agentId,
-        resolvedPath: resolution?.resolvedPath ?? null,
-      },
+        command: cmdText,
+        reason: "approval-required",
+      }),
+    );
+    await sendInvokeResult(client, frame, {
+      ok: false,
+      error: { code: "UNAVAILABLE", message: "SYSTEM_RUN_DENIED: approval required" },
     });
-    if (decision === "deny") {
-      client.sendEvent(
-        "exec.denied",
-        buildExecEventPayload({
-          sessionKey,
-          runId,
-          host: "node",
-          command: cmdText,
-          reason: "user-denied",
-        }),
-      );
-      client.sendInvokeResponse({
-        type: "invoke-res",
-        id: frame.id,
-        ok: false,
-        error: { code: "UNAVAILABLE", message: "SYSTEM_RUN_DENIED: user denied" },
-      });
-      return;
-    }
-    if (!decision) {
-      if (askFallback === "full") {
-        approvedByAsk = true;
-      } else if (askFallback === "allowlist") {
-        if (allowlistMatch || skillAllow) {
-          approvedByAsk = true;
-        } else {
-          client.sendEvent(
-            "exec.denied",
-            buildExecEventPayload({
-              sessionKey,
-              runId,
-              host: "node",
-              command: cmdText,
-              reason: "approval-required",
-            }),
-          );
-          client.sendInvokeResponse({
-            type: "invoke-res",
-            id: frame.id,
-            ok: false,
-            error: { code: "UNAVAILABLE", message: "SYSTEM_RUN_DENIED: approval required" },
-          });
-          return;
-        }
-      } else {
-        client.sendEvent(
-          "exec.denied",
-          buildExecEventPayload({
-            sessionKey,
-            runId,
-            host: "node",
-            command: cmdText,
-            reason: "approval-required",
-          }),
-        );
-        client.sendInvokeResponse({
-          type: "invoke-res",
-          id: frame.id,
-          ok: false,
-          error: { code: "UNAVAILABLE", message: "SYSTEM_RUN_DENIED: approval required" },
-        });
-        return;
-      }
-    }
-    if (decision === "allow-once") {
-      approvedByAsk = true;
-    }
-    if (decision === "allow-always") {
-      approvedByAsk = true;
-      if (security === "allowlist") {
-        const pattern = resolution?.resolvedPath ?? resolution?.rawExecutable ?? argv[0] ?? "";
-        if (pattern) addAllowlistEntry(approvals.file, agentId, pattern);
-      }
-    }
+    return;
+  }
+  if (approvalDecision === "allow-always" && security === "allowlist") {
+    const pattern = resolution?.resolvedPath ?? resolution?.rawExecutable ?? argv[0] ?? "";
+    if (pattern) addAllowlistEntry(approvals.file, agentId, pattern);
   }
 
   if (security === "allowlist" && !allowlistMatch && !skillAllow && !approvedByAsk) {
-    client.sendEvent(
+    await sendNodeEvent(
+      client,
       "exec.denied",
       buildExecEventPayload({
         sessionKey,
@@ -784,9 +720,7 @@ async function handleInvoke(
         reason: "allowlist-miss",
       }),
     );
-    client.sendInvokeResponse({
-      type: "invoke-res",
-      id: frame.id,
+    await sendInvokeResult(client, frame, {
       ok: false,
       error: { code: "UNAVAILABLE", message: "SYSTEM_RUN_DENIED: allowlist miss" },
     });
@@ -798,7 +732,8 @@ async function handleInvoke(
   }
 
   if (params.needsScreenRecording === true) {
-    client.sendEvent(
+    await sendNodeEvent(
+      client,
       "exec.denied",
       buildExecEventPayload({
         sessionKey,
@@ -808,16 +743,15 @@ async function handleInvoke(
         reason: "permission:screenRecording",
       }),
     );
-    client.sendInvokeResponse({
-      type: "invoke-res",
-      id: frame.id,
+    await sendInvokeResult(client, frame, {
       ok: false,
       error: { code: "UNAVAILABLE", message: "PERMISSION_MISSING: screenRecording" },
     });
     return;
   }
 
-  client.sendEvent(
+  await sendNodeEvent(
+    client,
     "exec.started",
     buildExecEventPayload({
       sessionKey,
@@ -842,7 +776,8 @@ async function handleInvoke(
     }
   }
   const combined = [result.stdout, result.stderr, result.error].filter(Boolean).join("\n");
-  client.sendEvent(
+  await sendNodeEvent(
+    client,
     "exec.finished",
     buildExecEventPayload({
       sessionKey,
@@ -856,9 +791,7 @@ async function handleInvoke(
     }),
   );
 
-  client.sendInvokeResponse({
-    type: "invoke-res",
-    id: frame.id,
+  await sendInvokeResult(client, frame, {
     ok: true,
     payloadJSON: JSON.stringify({
       exitCode: result.exitCode,
@@ -876,4 +809,97 @@ function decodeParams<T>(raw?: string | null): T {
     throw new Error("INVALID_REQUEST: paramsJSON required");
   }
   return JSON.parse(raw) as T;
+}
+
+function coerceNodeInvokePayload(payload: unknown): NodeInvokeRequestPayload | null {
+  if (!payload || typeof payload !== "object") return null;
+  const obj = payload as Record<string, unknown>;
+  const id = typeof obj.id === "string" ? obj.id.trim() : "";
+  const nodeId = typeof obj.nodeId === "string" ? obj.nodeId.trim() : "";
+  const command = typeof obj.command === "string" ? obj.command.trim() : "";
+  if (!id || !nodeId || !command) return null;
+  const paramsJSON =
+    typeof obj.paramsJSON === "string"
+      ? obj.paramsJSON
+      : obj.params !== undefined
+        ? JSON.stringify(obj.params)
+        : null;
+  const timeoutMs = typeof obj.timeoutMs === "number" ? obj.timeoutMs : null;
+  const idempotencyKey = typeof obj.idempotencyKey === "string" ? obj.idempotencyKey : null;
+  return {
+    id,
+    nodeId,
+    command,
+    paramsJSON,
+    timeoutMs,
+    idempotencyKey,
+  };
+}
+
+async function sendInvokeResult(
+  client: GatewayClient,
+  frame: NodeInvokeRequestPayload,
+  result: {
+    ok: boolean;
+    payload?: unknown;
+    payloadJSON?: string | null;
+    error?: { code?: string; message?: string } | null;
+  },
+) {
+  try {
+    await client.request("node.invoke.result", buildNodeInvokeResultParams(frame, result));
+  } catch {
+    // ignore: node invoke responses are best-effort
+  }
+}
+
+export function buildNodeInvokeResultParams(
+  frame: NodeInvokeRequestPayload,
+  result: {
+    ok: boolean;
+    payload?: unknown;
+    payloadJSON?: string | null;
+    error?: { code?: string; message?: string } | null;
+  },
+): {
+  id: string;
+  nodeId: string;
+  ok: boolean;
+  payload?: unknown;
+  payloadJSON?: string;
+  error?: { code?: string; message?: string };
+} {
+  const params: {
+    id: string;
+    nodeId: string;
+    ok: boolean;
+    payload?: unknown;
+    payloadJSON?: string;
+    error?: { code?: string; message?: string };
+  } = {
+    id: frame.id,
+    nodeId: frame.nodeId,
+    ok: result.ok,
+  };
+  if (result.payload !== undefined) {
+    params.payload = result.payload;
+  }
+  if (typeof result.payloadJSON === "string") {
+    params.payloadJSON = result.payloadJSON;
+  }
+  if (result.error) {
+    params.error = result.error;
+  }
+  return params;
+}
+
+async function sendNodeEvent(client: GatewayClient, event: string, payload: unknown) {
+  try {
+    await client.request("node.event", {
+      event,
+      payloadJSON: payload ? JSON.stringify(payload) : null,
+    });
+  } catch {
+    // ignore: node events are best-effort
+  }
 }

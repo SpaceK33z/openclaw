@@ -12,6 +12,7 @@ import {
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { buildMentionRegexes, matchesMentionPatterns } from "../auto-reply/reply/mentions.js";
 import { formatLocationText, toLocationContext } from "../channels/location.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import {
   readSessionUpdatedAt,
   recordSessionMetaFromInbound,
@@ -42,7 +43,7 @@ import {
 import {
   firstDefined,
   isSenderAllowed,
-  normalizeAllowFrom,
+  normalizeAllowFromWithStore,
   resolveSenderAllowMatch,
 } from "./bot-access.js";
 import { upsertTelegramPairingRequest } from "./pairing-store.js";
@@ -138,12 +139,12 @@ export const buildTelegramMessageContext = async ({
     },
   });
   const mentionRegexes = buildMentionRegexes(cfg, route.agentId);
-  const effectiveDmAllow = normalizeAllowFrom([...(allowFrom ?? []), ...storeAllowFrom]);
+  const effectiveDmAllow = normalizeAllowFromWithStore({ allowFrom, storeAllowFrom });
   const groupAllowOverride = firstDefined(topicConfig?.allowFrom, groupConfig?.allowFrom);
-  const effectiveGroupAllow = normalizeAllowFrom([
-    ...(groupAllowOverride ?? groupAllowFrom ?? []),
-    ...storeAllowFrom,
-  ]);
+  const effectiveGroupAllow = normalizeAllowFromWithStore({
+    allowFrom: groupAllowOverride ?? groupAllowFrom,
+    storeAllowFrom,
+  });
   const hasGroupAllowOverride = typeof groupAllowOverride !== "undefined";
 
   if (isGroup && groupConfig?.enabled === false) {
@@ -234,7 +235,7 @@ export const buildTelegramMessageContext = async ({
                   `Pairing code: ${code}`,
                   "",
                   "Ask the bot owner to approve with:",
-                  "clawdbot pairing approve telegram <code>",
+                  formatCliCommand("clawdbot pairing approve telegram <code>"),
                 ].join("\n"),
               );
             }

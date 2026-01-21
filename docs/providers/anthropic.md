@@ -34,6 +34,30 @@ clawdbot onboard --anthropic-api-key "$ANTHROPIC_API_KEY"
 }
 ```
 
+## Prompt caching (Anthropic API)
+
+Clawdbot does **not** override Anthropic’s default cache TTL unless you set it.
+This is **API-only**; Claude Code CLI OAuth ignores TTL settings.
+
+To set the TTL per model, use `cacheControlTtl` in the model `params`:
+
+```json5
+{
+  agents: {
+    defaults: {
+      models: {
+        "anthropic/claude-opus-4-5": {
+          params: { cacheControlTtl: "5m" } // or "1h"
+        }
+      }
+    }
+  }
+}
+```
+
+Clawdbot includes the `extended-cache-ttl-2025-04-11` beta flag for Anthropic API
+requests; keep it if you override provider headers (see [/gateway/configuration](/gateway/configuration)).
+
 ## Option B: Claude Code CLI (setup-token or OAuth)
 
 **Best for:** using your Claude subscription or existing Claude Code CLI login.

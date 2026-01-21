@@ -23,7 +23,7 @@ Exec approvals are enforced locally on the execution host:
 - **node host** → node runner (macOS companion app or headless node host)
 
 Planned macOS split:
-- **node service** forwards `system.run` to the **macOS app** over local IPC.
+- **node host service** forwards `system.run` to the **macOS app** over local IPC.
 - **macOS app** enforces approvals + executes the command in UI context.
 
 ## Settings and storage
@@ -120,7 +120,11 @@ CLI: `clawdbot approvals` supports gateway or node editing (see [Approvals CLI](
 
 ## Approval flow
 
-When a prompt is required, the companion app displays a confirmation dialog with:
+When a prompt is required, the gateway broadcasts `exec.approval.requested` to operator clients.
+The Control UI and macOS app resolve it via `exec.approval.resolve`, then the gateway forwards the
+approved request to the node host.
+
+The confirmation dialog includes:
 - command + args
 - cwd
 - agent id
