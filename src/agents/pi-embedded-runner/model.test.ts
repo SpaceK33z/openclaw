@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("@mariozechner/pi-coding-agent", () => ({
-  AuthStorage: class {
-    constructor() {}
-  },
+vi.mock("../pi-model-discovery.js", () => ({
+  AuthStorage: class {},
   ModelRegistry: class {
     find() {
       return null;

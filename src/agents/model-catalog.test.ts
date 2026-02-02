@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import type { OpenClawConfig } from "../config/config.js";
 import {
   __setModelCatalogImportForTest,
@@ -7,7 +6,7 @@ import {
   resetModelCatalogCacheForTest,
 } from "./model-catalog.js";
 
-type PiSdkModule = typeof import("@mariozechner/pi-coding-agent");
+type PiSdkModule = typeof import("./pi-model-discovery.js");
 
 vi.mock("./models-config.js", () => ({
   ensureOpenClawModelsJson: vi.fn().mockResolvedValue({ agentDir: "/tmp", wrote: false }),
@@ -38,9 +37,7 @@ describe("loadModelCatalog", () => {
         throw new Error("boom");
       }
       return {
-        AuthStorage: class {
-          constructor() {}
-        },
+        AuthStorage: class {},
         ModelRegistry: class {
           getAll() {
             return [{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }];
@@ -68,9 +65,7 @@ describe("loadModelCatalog", () => {
     __setModelCatalogImportForTest(
       async () =>
         ({
-          AuthStorage: class {
-            constructor() {}
-          },
+          AuthStorage: class {},
           ModelRegistry: class {
             getAll() {
               return [
