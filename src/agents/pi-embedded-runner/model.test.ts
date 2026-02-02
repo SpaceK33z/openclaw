@@ -10,6 +10,8 @@ vi.mock("../pi-model-discovery.js", () => ({
       return [];
     }
   },
+  discoverAuthStorage: vi.fn(() => ({})),
+  discoverModels: vi.fn(() => ({ find: vi.fn(() => null) })),
 }));
 
 import type { OpenClawConfig } from "../../config/config.js";
