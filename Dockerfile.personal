@@ -30,10 +30,10 @@ RUN apt-get update && \
 RUN pip3 install --break-system-packages httpx rich
 
 # Configure SSH
-RUN mkdir -p /run/sshd && \
-    ssh-keygen -A && \
+RUN ssh-keygen -A && \
     sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config && \
-    sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 
 WORKDIR /app
 
@@ -72,7 +72,7 @@ EXPOSE 18789 22
 # SSH_PUBLIC_KEY env var: if set, configures authorized_keys and starts sshd
 # CLAWDBOT_GATEWAY_TOKEN is exported to bashrc so SSH sessions can use it
 CMD if [ -n "$SSH_PUBLIC_KEY" ]; then \
-      mkdir -p /root/.ssh && \
+      mkdir -p /run/sshd /root/.ssh && \
       chmod 700 /root/.ssh && \
       echo "$SSH_PUBLIC_KEY" > /root/.ssh/authorized_keys && \
       chmod 600 /root/.ssh/authorized_keys && \
