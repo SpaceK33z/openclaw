@@ -32,7 +32,8 @@ jobs:
           # Start container and check it boots within 30s
           docker run -d --name openclaw-boot-test \
             -e OPENCLAW_GATEWAY_TOKEN=test-token \
-            openclaw-personal:test
+            openclaw-personal:test \
+            node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured --token test-token
 
           # Wait for gateway to be ready (polls healthcheck)
           for i in $(seq 1 30); do
