@@ -60,8 +60,9 @@ RUN OPENCLAW_A2UI_SKIP_MISSING=1 pnpm build
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
-RUN printf '#!/bin/sh\nexec node /app/dist/index.js "$@"\n' > /usr/local/bin/clawdbot \
-    && chmod +x /usr/local/bin/clawdbot
+RUN printf '#!/bin/sh\nexec node /app/openclaw.mjs "$@"\n' > /usr/local/bin/openclaw \
+    && chmod +x /usr/local/bin/openclaw \
+    && ln -s /usr/local/bin/openclaw /usr/local/bin/clawdbot
 
 # Install Playwright Chromium with system dependencies
 RUN npx -y playwright@latest install --with-deps chromium
@@ -83,4 +84,4 @@ CMD if [ -n "$SSH_PUBLIC_KEY" ]; then \
       echo "export CLAWDBOT_GATEWAY_TOKEN=$CLAWDBOT_GATEWAY_TOKEN" >> /root/.bashrc && \
       /usr/sbin/sshd; \
     fi && \
-    node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured
+    node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured
