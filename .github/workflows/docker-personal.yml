@@ -1,0 +1,57 @@
+name: Build Personal Docker Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile.personal"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "patches/**"
+      - "src/**"
+      - "ui/**"
+      - "scripts/**"
+      - "openclaw.mjs"
+      - ".github/workflows/docker-personal.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Dockerfile.personal
+        run: docker build -f Dockerfile.personal -t openclaw-personal:test .
+
+      - name: Boot test
+        run: |
+          # Start container and check it boots within 30s
+          docker run -d --name openclaw-boot-test \
+            -e CLAWDBOT_GATEWAY_TOKEN=test-token \
+            openclaw-personal:test
+
+          # Wait for gateway to be ready (polls healthcheck)
+          for i in $(seq 1 30); do
+            if docker exec openclaw-boot-test node -e "
+              fetch('http://127.0.0.1:18789/healthz')
+                .then(r => { if (r.ok) process.exit(0); else process.exit(1); })
+                .catch(() => process.exit(1));
+            " 2>/dev/null; then
+              echo "✅ Gateway booted successfully"
+              exit 0
+            fi
+            echo "Waiting for gateway... ($i/30)"
+            sleep 1
+          done
+
+          echo "❌ Gateway failed to boot within 30s"
+          docker logs openclaw-boot-test
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f openclaw-boot-test 2>/dev/null || true
