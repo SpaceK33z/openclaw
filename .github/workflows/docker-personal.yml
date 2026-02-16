@@ -31,7 +31,7 @@ jobs:
         run: |
           # Start container and check it boots within 30s
           docker run -d --name openclaw-boot-test \
-            -e CLAWDBOT_GATEWAY_TOKEN=test-token \
+            -e OPENCLAW_GATEWAY_TOKEN=test-token \
             openclaw-personal:test
 
           # Wait for gateway to be ready (polls healthcheck)
