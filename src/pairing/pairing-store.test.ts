@@ -98,7 +98,11 @@ describe("pairing store", () => {
 
   it("regenerates when a generated code collides", async () => {
     await withTempStateDir(async () => {
-      const spy = vi.spyOn(crypto, "randomInt");
+      const spy = vi.spyOn(crypto, "randomInt") as unknown as {
+        mockReturnValue: (value: number) => void;
+        mockImplementation: (fn: () => number) => void;
+        mockRestore: () => void;
+      };
       try {
         spy.mockReturnValue(0);
         const first = await upsertChannelPairingRequest({
@@ -182,6 +186,40 @@ describe("pairing store", () => {
       const channelScoped = await readChannelAllowFromStore("telegram");
       expect(accountScoped).toContain("12345");
       expect(channelScoped).not.toContain("12345");
+    });
+  });
+
+  it("reads legacy channel-scoped allowFrom for default account", async () => {
+    await withTempStateDir(async (stateDir) => {
+      const oauthDir = resolveOAuthDir(process.env, stateDir);
+      await fs.mkdir(oauthDir, { recursive: true });
+      await fs.writeFile(
+        path.join(oauthDir, "telegram-allowFrom.json"),
+        JSON.stringify(
+          {
+            version: 1,
+            allowFrom: ["1001"],
+          },
+          null,
+          2,
+        ) + "\n",
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(oauthDir, "telegram-default-allowFrom.json"),
+        JSON.stringify(
+          {
+            version: 1,
+            allowFrom: ["1002"],
+          },
+          null,
+          2,
+        ) + "\n",
+        "utf8",
+      );
+
+      const scoped = await readChannelAllowFromStore("telegram", process.env, "default");
+      expect(scoped).toEqual(["1002", "1001"]);
     });
   });
 });
